@@ -1,0 +1,2 @@
+# Memory_overall_build
+提供方法，便捷快速的把AI对话文本变换成向量记忆库，提供更强的RAG基底
