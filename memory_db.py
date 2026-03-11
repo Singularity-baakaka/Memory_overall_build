@@ -39,8 +39,7 @@ class MemoryDB:
         原理：
         1. 确保数据目录存在（os.makedirs）；
         2. 初始化或复用外部传入的 OllamaEmbedder 嵌入器；
-        3. 连接 SQLite 数据库文件（memory_episodes.db），设置 check_same_thread=False
-           允许跨线程访问，row_factory=sqlite3.Row 使查询结果可按列名访问；
+        3. 连接 SQLite 数据库文件（memory_episodes.db），设置 check_same_thread=False 允许跨线程访问，row_factory=sqlite3.Row 使查询结果可按列名访问；
         4. 创建数据表结构（若不存在）；
         5. 初始化三个 FAISS 向量索引的文件路径；
         6. 从磁盘加载已有的 FAISS 索引（若存在），实现数据持久化。
