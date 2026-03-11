@@ -85,8 +85,10 @@ def chunk_dialogues(dialogues: List[Dict[str, str]],
     :param chunk_size: 每个片段包含的最大对话条数
     :return: [[{role, content}, ...], ...]  二维列表
     """
-    if chunk_size < 2:
-        chunk_size = 2
+    # 至少需要 2 条对话才能构成一个有意义的对话片段（一问一答）
+    MIN_CHUNK_SIZE = 2
+    if chunk_size < MIN_CHUNK_SIZE:
+        chunk_size = MIN_CHUNK_SIZE
     chunks = []
     for i in range(0, len(dialogues), chunk_size):
         chunk = dialogues[i:i + chunk_size]
@@ -194,18 +196,20 @@ def build_episode_data_fast(dialogue_chunk: List[Dict[str, str]],
         for d in dialogue_chunk
     ]
 
-    # 简单提取关键词：取所有内容中出现的名词性短语（简化版：取前几个角色名和长短语）
+    # 简单提取关键词：从对话内容中提取 2~6 字的中文短语作为候选关键词
     all_content = " ".join(d["content"] for d in dialogue_chunk)
-    # 提取较长的词组作为关键词
-    words = re.findall(r'[\u4e00-\u9fff]{2,6}', all_content)
-    # 去重并取前 5 个
+    # CJK 统一汉字范围 U+4E00–U+9FFF，长度 2~6 字可覆盖大多数中文词语和短语
+    CJK_KEYWORD_PATTERN = r'[\u4e00-\u9fff]{2,6}'
+    MAX_KEYWORDS = 5
+    words = re.findall(CJK_KEYWORD_PATTERN, all_content)
+    # 去重并取前 MAX_KEYWORDS 个
     seen = set()
     keywords = []
     for w in words:
         if w not in seen:
             seen.add(w)
             keywords.append(w)
-        if len(keywords) >= 5:
+        if len(keywords) >= MAX_KEYWORDS:
             break
 
     return {
