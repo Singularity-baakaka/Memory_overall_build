@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+data/
+*.faiss
+*_map.json
+*.db
+.idea/
+.vscode/
+*.egg-info/
+dist/
+build/
