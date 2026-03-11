@@ -144,8 +144,9 @@ class TestParseDialogueFile(unittest.TestCase):
 
     def test_nonexistent_file_raises(self):
         """测试文件不存在抛出异常"""
+        nonexistent = os.path.join(tempfile.gettempdir(), "nonexistent_dialogue_12345.txt")
         with self.assertRaises(FileNotFoundError):
-            parse_dialogue_file("/tmp/nonexistent_dialogue_12345.txt")
+            parse_dialogue_file(nonexistent)
 
 
 class TestSegmentDialogue(unittest.TestCase):

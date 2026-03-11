@@ -225,7 +225,8 @@ def txt_to_vectordb(
     :param txt_path: txt 对话文件路径
     :param db_path: 向量库输出目录，默认 ./data/memory_db
     :param turns_per_segment: 每段对话轮数，默认 10
-    :param embedder: 可选的嵌入器实例（不传则使用默认 gte-base-zh）
+    :param embedder: 可选的嵌入器实例，不传则由 MemoryDB 内部创建默认的
+                     OllamaEmbedder("verdx/gte-base-zh")
     :return: 包含统计信息的字典
     """
     print(f"📖 正在解析对话文件: {txt_path}")
