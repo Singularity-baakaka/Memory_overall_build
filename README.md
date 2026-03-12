@@ -396,3 +396,175 @@ $$
 #### C. `config.py` - 配置
 
 1.  `get_llm_config()`: 返回全局配置字典，包含 API Key, URL, Temperature 等模型参数。
+
+---
+
+#### D. `txt_to_vectordb.py` - 对话文本固化脚本
+
+本模块是整个项目的**入口管道**，负责把一份普通的 txt 聊天记录，经过解析→切片→摘要→入库，变成可被语义检索的向量记忆库。
+
+> **整体数据流**
+> ```
+> txt 文件
+>   ↓ parse_dialogue_file()       逐行识别角色和内容
+> 对话列表 [{role, content}, ...]
+>   ↓ chunk_dialogues()           按固定轮数切成若干片段
+> 对话片段 [[...], [...], ...]
+>   ↓ generate_episode_summary()  (LLM模式) 调 LLM 生成摘要/氛围/关键词
+>   ↓ build_episode_data_fast()   (快速模式) 直接用原文+正则提取关键词
+> episode_data 字典
+>   ↓ MemoryDB.add_memory_episode()
+> SQLite + FAISS 向量记忆库（持久化，可检索）
+> ```
+
+**1. `parse_dialogue_file(filepath)`**
+
+*   **功能**：读取 txt 对话文件，逐行解析成结构化的对话列表。
+*   **原理**：
+    用正则 `r'^(.+?)[：:]\s*(.*)'` 匹配每一行——同时支持中英文冒号：
+    - 匹配成功 → 新建一条 `{"role": 角色名, "content": 内容}` 字典；
+    - 匹配失败（无角色前缀）→ 视为上一条消息的续行，直接追加到 `content` 末尾；
+    - 空行跳过，不影响解析。
+*   **效果**：
+    ```
+    "用户: 你好\n今天天气不错\n林梓墨: 是啊！"
+                    ↓
+    [{"role": "用户", "content": "你好\n今天天气不错"},
+     {"role": "林梓墨", "content": "是啊！"}]
+    ```
+    文件不存在时抛出 `FileNotFoundError`，空文件返回 `[]`。
+
+**2. `chunk_dialogues(dialogues, chunk_size=20)`**
+
+*   **功能**：将完整对话列表按固定轮数切成多个片段，每个片段将成为独立的一条记忆。
+*   **原理**：
+    用 Python 切片 `dialogues[i : i+chunk_size]`，步长为 `chunk_size` 滑动截取。
+    内置最小值保护：`chunk_size < 2` 时强制设为 2（单条消息不构成有意义对话）。
+*   **效果**：
+
+    | chunk_size | 12条对话 → 片段数 | 特点 |
+    |---|---|---|
+    | 4 | 3 片（4+4+4） | 粒度细，检索精度高 |
+    | 20 | 1 片（12条全在） | 粒度粗，上下文更完整 |
+
+**3. `_SUMMARY_PROMPT`（模块级常量）**
+
+*   **功能**：发送给 LLM 的提示词模板，约束输出严格 JSON 格式。
+*   **原理**：
+    提示词要求 LLM 扮演"记忆整理专家"，输出三个字段：
+    `narrative`（100字内第三人称叙事摘要）、`atmosphere`（2-4个情感词）、`keywords`（关键词列表）。
+    只输出 JSON，禁止任何额外文字，减少 `safe_parse_json` 的清洗压力。
+
+**4. `generate_episode_summary(dialogue_chunk)`**
+
+*   **功能**：调用 LLM，为一段对话生成高质量叙事摘要、氛围标签和关键词（LLM 模式专用）。
+*   **原理**：
+    1. 把对话列表拼成 `"角色: 内容"` 多行文本；
+    2. 构造 `messages`（system + user）发送给 LLM，`temperature=0.3` 降低随机性；
+    3. `safe_parse_json()` 解析返回结果（自动清除 LLM 可能包裹的 ` ```json ``` ` 标记）；
+    4. 提取 `narrative / atmosphere / keywords` 三个字段返回。
+*   **效果**：输入10条对话 → 输出 `{"narrative": "...", "atmosphere": "好奇, 轻松", "keywords": ["霍金", "黑洞"]}` 。若 LLM 失败或格式不合法，返回 `None`，上层自动降级到快速模式。
+
+**5. `build_episode_data(dialogue_chunk, summary, timestamp=None)`**
+
+*   **功能**：将对话片段 + LLM 摘要组装为 `MemoryDB` 可直接写入的 `episode_data` 字典（纯数据组装，无业务逻辑）。
+*   **原理**：从 `dialogue_chunk` 提取原始对话作为 `raw_dialogue`，从 `summary` 取摘要字段，`timestamp` 默认取当前时间，`importance` 固定 0.5。
+*   **效果**：输出的字典满足 `MemoryDB.add_memory_episode()` 的接口规范，可直接入库。
+
+**6. `build_episode_data_fast(dialogue_chunk, timestamp=None)`**
+
+*   **功能**：不依赖 LLM，直接用对话原文构建 `episode_data`（快速/离线模式）。
+*   **原理**：
+    - `narrative`：直接拼接对话原文多行文本；
+    - `atmosphere`：留空（无法自动推断情感）；
+    - `keywords`：用正则 `r'[\u4e00-\u9fff]{2,6}'` 扫描长度 2~6 字的中文词组，去重取前 5 个。
+*   **效果**：
+
+    | 维度 | LLM 模式 | 快速模式 |
+    |---|---|---|
+    | narrative 质量 | 高（精炼摘要） | 低（原文堆砌） |
+    | atmosphere | 有（情感标签） | 空 |
+    | keywords 质量 | 高（语义提炼） | 中（正则粗提取） |
+    | 速度 | 慢（需联网） | 极快（纯本地） |
+
+**7. `txt_to_vectordb(txt_path, output_dir, chunk_size, use_llm, embedder)`**
+
+*   **功能**：整个模块的主入口函数，一键将 txt 文件固化为可检索的向量记忆库。
+*   **原理**：串联所有步骤，包含 LLM 失败时的自动降级容错。执行完毕后 `output_dir` 中生成 `.db`、`.faiss`、`_map.json` 等持久化文件。
+*   **效果**：返回统计字典 `{status, total_dialogues, total_chunks, success, failed, db_stats}`。
+
+**8. `main()`**
+
+*   **功能**：命令行入口，`argparse` 解析参数后调用 `txt_to_vectordb()`。
+*   **效果**：支持直接从终端运行，例如：
+    ```bash
+    python txt_to_vectordb.py chat.txt --output ./my_db --chunk-size 10 --fast
+    ```
+
+---
+
+#### E. `test_txt_to_vectordb.py` - 单元与集成测试
+
+本模块通过 `unittest` 框架对 `txt_to_vectordb.py` 中的所有核心函数进行测试，**无需启动任何外部服务**（`MockEmbedder` 替代真实 Ollama）。
+
+**`MockEmbedder` 类**
+
+*   **功能**：模拟 `OllamaEmbedder`，在无 Ollama 服务时提供确定性伪向量。
+*   **原理**：
+    1. `hash(text) % 2^31` 得到非负随机种子；
+    2. `np.random.seed(种子)` 初始化，保证**相同文本始终产生相同向量**；
+    3. 标准正态分布采样 768 维，L2 归一化后返回，接口与真实嵌入器完全兼容。
+*   **效果**：测试无需网络，任何机器稳定复现，FAISS 仍能产生差异化相似度排序。
+
+**测试数据常量**
+
+| 常量名 | 内容 | 用途 |
+|---|---|---|
+| `SAMPLE_DIALOGUE` | 12条对话（书籍+电影两个话题） | 解析数量验证、端到端检索验证 |
+| `SAMPLE_DIALOGUE_ENGLISH_COLON` | 2条，使用英文冒号 | 冒号兼容性测试 |
+| `SAMPLE_MULTILINE` | 3条，含续行 | 多行拼接逻辑测试 |
+
+**`TestParseDialogueFile`** — 测试 `parse_dialogue_file()`
+
+| 测试方法 | 验证内容 |
+|---|---|
+| `test_basic_parse` | 中文冒号格式能正确识别角色和内容 |
+| `test_english_colon` | 英文冒号 `:` 也能被正确解析 |
+| `test_multiline_content` | 续行被正确拼接到上一条消息的 content 中 |
+| `test_empty_file` | 空文件返回 `[]`，不抛异常 |
+| `test_file_not_found` | 文件不存在时抛出 `FileNotFoundError` |
+| `test_dialogue_count` | SAMPLE_DIALOGUE 恰好解析出 12 条（回归测试） |
+
+**`TestChunkDialogues`** — 测试 `chunk_dialogues()`
+
+| 测试方法 | 验证内容 |
+|---|---|
+| `test_basic_chunking` | 10条/chunk=4 → 3片（4+4+2），尾部不足也保留 |
+| `test_exact_division` | 8条/chunk=4 → 恰好 2片，无多余空片 |
+| `test_single_chunk` | chunk_size 大于总数时，全部在 1 个片段中 |
+| `test_empty_dialogues` | 空输入返回 `[]` |
+| `test_min_chunk_size` | `chunk_size=1` 被强制升为 2 |
+
+**`TestBuildEpisodeDataFast`** — 测试 `build_episode_data_fast()`
+
+| 测试方法 | 验证内容 |
+|---|---|
+| `test_fast_build` | 输出包含全部必要字段，narrative 含原文，raw_dialogue 数量正确 |
+| `test_fast_build_keywords` | 从中文对话成功正则提取到非空关键词列表 |
+
+**`TestBuildEpisodeData`** — 测试 `build_episode_data()`（不调真实 LLM）
+
+| 测试方法 | 验证内容 |
+|---|---|
+| `test_build_with_summary` | narrative/atmosphere/keywords 正确从模拟 summary 映射，raw_dialogue 数量正确 |
+
+**`TestFullPipeline`** — 端到端集成测试 `txt_to_vectordb()`
+
+*   **测试策略**：`MockEmbedder` + `tempfile.mkdtemp()` 临时沙箱，`tearDown` 自动清理，各测试相互隔离。
+
+| 测试方法 | 验证内容 |
+|---|---|
+| `test_full_pipeline_fast_mode` | 统计字典正确（total=12, failed=0）；重新打开库后语义检索"电影"有命中，结果包含 narrative/similarity/raw_dialogue |
+| `test_pipeline_creates_db_files` | 固化后 `memory_episodes.db` 和 `semantic.faiss` 文件确实落盘 |
+| `test_pipeline_different_chunk_sizes` | chunk_size=4 产生的片段数严格大于 chunk_size=20 产生的片段数 |
+
